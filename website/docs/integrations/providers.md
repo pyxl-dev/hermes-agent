@@ -51,6 +51,8 @@ You need at least one way to connect to an LLM. Use `hermes model` to switch pro
 | **LM Studio** | `hermes model` → "LM Studio" (provider: `lmstudio`, optional `LM_API_KEY`) |
 | **Custom Endpoint** | `hermes model` → choose "Custom endpoint" (saved in `config.yaml`) |
 
+OpenCode providers send a stable per-conversation `x-opencode-session` header on main turns and auxiliary calls such as context compression. OpenCode uses it for backend affinity; the value is derived from the Hermes session identifier and contains no personal profile data.
+
 For the official API-key path, see the dedicated [Google Gemini guide](/guides/google-gemini).
 
 :::tip Model key alias
