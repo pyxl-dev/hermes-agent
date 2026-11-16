@@ -99,3 +99,20 @@ def test_drain_progress_reporter_prints_holder_and_config_knob(tmp_path, monkeyp
     out.clear()
     tick()
     assert out and out[0].strip()
+
+
+def test_drain_reporter_repeats_one_line_while_the_same_turn_holds(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    state = tmp_path / "gateway_state.json"
+    key = "agent:dofus:local:dm:local-" + "6dc5" * 16
+    turns = [{"kind": "chat", "session": key, "pid": 60321, "elapsed_s": 131, "model": "m", "current_tool": "terminal"},
+             {"kind": "chat", "session": key.replace("6dc5", "e5a7"), "pid": 60321, "elapsed_s": 131}]
+    out = []
+    tick = drain_progress_reporter(tmp_path, budget_s=600, interval_s=0.0, emit=out.append)
+    for work in (turns, turns, turns[1:]):
+        state.write_text(json.dumps({"pid": 1, "gateway_state": "draining", "active_work": work}))
+        tick()
+    first, repeat, finished = out
+    assert "hermes --tui" in first and "60321" not in first and "6dc56dc5…" in first
+    assert repeat.count("\n") == 0 and "waiting on 2" in repeat and "hermes --tui" not in repeat
+    assert finished.startswith("  ✓ finished: agent:dofus:") and "waiting on 1" in finished

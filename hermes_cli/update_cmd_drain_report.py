@@ -10,6 +10,7 @@ that into progress lines.
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -24,6 +25,14 @@ def _fmt_elapsed(seconds: object) -> str:
     except (TypeError, ValueError):
         return "?"
     return f"{total // 60}m{total % 60:02d}s" if total >= 60 else f"{total}s"
+
+
+_LONG_HEX = re.compile(r"[0-9a-f]{16,}")
+
+
+def _short_session(session: str) -> str:
+    """Session keys end in a 64-hex id; 8 chars still tell them apart on one screen."""
+    return _LONG_HEX.sub(lambda m: m.group(0)[:8] + "…", session)
 
 
 def _cron_job_name(job_id: str, home: Optional[Path]) -> Optional[str]:
@@ -59,11 +68,12 @@ def describe_active_work_unit(unit: dict, home: Optional[Path] = None) -> str:
         where = f" in external worker{pid_part}" if unit.get("external") else f" in-process{pid_part}"
         return f"{label}{where}{elapsed_part}"
     if kind == "chat":
-        session = str(unit.get("session") or "?")
+        # In-process chat turns all carry the gateway's own pid: it names nothing, so it is left out.
+        session = _short_session(str(unit.get("session") or "?"))
         model = unit.get("model")
         tool = unit.get("current_tool")
         detail = ", ".join(p for p in (f"model {model}" if model else "", f"tool {tool}" if tool else "") if p)
-        return f"chat turn {session}{pid_part}{elapsed_part}" + (f" [{detail}]" if detail else "")
+        return f"chat turn {session}{elapsed_part}" + (f" [{detail}]" if detail else "")
     if kind == "delegation":
         goal = str(unit.get("goal") or "").strip()
         return (f"background delegation {unit.get('delegation_id') or '?'}{pid_part}{elapsed_part}"
@@ -92,6 +102,37 @@ def _tui_command(home: Optional[Path]) -> str:
     return f"hermes -p {name} --tui" if name and name != "default" else "hermes --tui"
 
 
+def _unit_id(unit: object) -> str:
+    """Stable identity of one unit across reports (elapsed and current tool change every tick)."""
+    if not isinstance(unit, dict):
+        return repr(unit)
+    for key in ("session", "job_id", "delegation_id"):
+        if unit.get(key):
+            return f"{unit.get('kind')}:{unit[key]}"
+    return f"{unit.get('kind')}:{unit.get('pid')}"
+
+
+def _unit_name(unit: object) -> str:
+    if not isinstance(unit, dict):
+        return "work"
+    name = unit.get("session") or unit.get("job_id") or unit.get("delegation_id") or unit.get("kind") or "work"
+    return _short_session(str(name))
+
+
+def _unit_short(unit: object) -> str:
+    """Name and age of one unit for the one-line repeat."""
+    age = unit.get("elapsed_s") if isinstance(unit, dict) else None
+    return _unit_name(unit) + (f" {_fmt_elapsed(age)}" if age is not None else "")
+
+
+def format_drain_line(work: Optional[list], *, remaining_s: float) -> str:
+    """One line for a report whose units did not change since the last full block."""
+    head = f"  ⏳ {max(remaining_s, 0):.0f}s left"
+    if not work:
+        return head + " · nothing reported, the gateway should exit momentarily"
+    return head + f" · waiting on {len(work)}: " + ", ".join(_unit_short(u) for u in work)
+
+
 def format_drain_report(work: Optional[list], *, remaining_s: float, home: Optional[Path] = None) -> str:
     """Multi-line progress block: what the gateway is waiting on plus how to stop waiting."""
     lines = [f"  ⏳ still draining — {max(remaining_s, 0):.0f}s left before the forced restart"]
@@ -115,16 +156,29 @@ def format_drain_report(work: Optional[list], *, remaining_s: float, home: Optio
 def drain_progress_reporter(home: Optional[Path] = None, *, budget_s: float,
                             interval_s: float = DRAIN_REPORT_INTERVAL_S,
                             emit: Callable[[str], None] = print) -> Callable[[], None]:
-    """Return a zero-arg callback for ``_wait_for_pid_exit(on_progress=...)`` that prints the drain
-    report every ``interval_s`` while the wait is in progress."""
+    """Return a zero-arg callback for ``_wait_for_pid_exit(on_progress=...)`` that reports the drain
+    every ``interval_s``: the full block (units plus how to release them) the first time and whenever
+    a new unit appears, then one line while the same units are held, naming any that finished."""
     started = time.monotonic()
-    state = {"last": started}
+    state: dict = {"last": started, "seen": None}
 
     def _tick() -> None:
         now = time.monotonic()
         if now - state["last"] < interval_s:
             return
         state["last"] = now
-        emit(format_drain_report(read_active_work(home), remaining_s=budget_s - (now - started), home=home))
+        work = read_active_work(home)
+        remaining = budget_s - (now - started)
+        ids = None if work is None else [_unit_id(u) for u in work]
+        seen = state["seen"]
+        if seen is None or ids is None or any(i not in seen for i in ids):
+            emit(format_drain_report(work, remaining_s=remaining, home=home))
+        else:
+            done = [name for i, name in seen.items() if i not in ids]
+            line = format_drain_line(work, remaining_s=remaining)
+            emit(("  ✓ finished: " + ", ".join(done) + "\n" if done else "") + line)
+        state["seen"] = None if work is None else {_unit_id(u): _unit_name(u) for u in work}
+
+    return _tick
 
     return _tick
